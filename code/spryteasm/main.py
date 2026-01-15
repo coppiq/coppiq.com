@@ -1,0 +1,379 @@
+import sys
+import json
+import os
+from enum import Enum
+
+class TokenTypes(Enum):
+    OPCODE =    0
+    REG_INDEX = 1
+    IMMEDIATE = 2
+    ADDRESS   = 3
+
+
+opcodes: dict = {
+    "lda": {"imm": 0},
+    "ldb": {"imm": 1},
+    "ldc": {"imm": 2},
+    "ldd": {"imm": 3},
+
+    "sab": {"imp": 4},
+    "sac": {"imp": 5},
+    "sad": {"imp": 6},
+    "bac": {"imp": 7},
+    "bad": {"imp": 8},
+    "cad": {"imp": 9},
+
+    "ina": {"imp": 10},
+    "inb": {"imp": 11},
+    "inc": {"imp": 12},
+    "ind": {"imp": 13},
+
+    "cpa": {"b": 14, "c": 15, "d": 16, "imm": 20},
+    "cpb": {"c": 17, "d": 18, "imm": 21},
+    "cpc": {"d": 19, "imm": 22},
+    "cpd": {"imm": 23},
+
+    "blt": {"imm": 24},
+    "ble": {"imm": 25},
+    "beq": {"imm": 26},
+    "bgt": {"imm": 27},
+    "bge": {"imm": 28},
+    "jmp": {"imm": 29},
+    
+    "agc": {"imp": 30},
+    "agv": {"imm": 31, "b": 32, "c": 33, "d": 34},
+
+    "psa": {"imp": 35},
+    "psb": {"imp": 36},
+    "psc": {"imp": 37},
+    "psd": {"imp": 38},
+
+    "pla": {"imp": 39},
+    "plb": {"imp": 40},
+    "plc": {"imp": 41},
+    "pld": {"imp": 42},
+
+    "jsr": {"imp": 43},
+    "rts": {"imp": 44},
+
+    "ada": {"imm": 45, "b": 49, "c": 50, "d": 51},
+    "adb": {"imm": 46, "a": 52, "c": 53, "d": 54},
+    "adc": {"imm": 47, "a": 55, "b": 56, "d": 57},
+    "add": {"imm": 48, "a": 58, "b": 59, "c": 60},
+
+    "dca": {"imp": 61},
+    "dcb": {"imp": 62},
+    "dcc": {"imp": 63},
+    "dcd": {"imp": 64},
+
+    "wfr": {"imp": 65},
+
+    "bnk": {"imm": 66},
+    "bke": {"imm": 67},
+    "kst": {"imm": 68},
+    "kjp": {"imm": 69},
+    "kjr": {"imm": 70},
+    "sin": {"imm": 71},
+
+    "cca": {"b": 72, "c": 73, "d": 74},
+    "ccb": {"a": 75, "c": 76, "d": 77},
+    "ccc": {"a": 78, "b": 79, "d": 80},
+    "ccd": {"a": 81, "b": 82, "c": 83},
+
+    "ltr": {"imp": 84},
+    
+    "mul": {"b": 85, "c": 86, "d": 87, "imm": 91},
+    "div": {"b": 88, "c": 89, "d": 90, "imm": 92},
+
+    "rnd": {"imp": 93},
+
+    "mda": {"imm": 94, "b": 98, "c": 99, "d": 100},
+    "mdb": {"imm": 95},
+    "mdc": {"imm": 96},
+    "mdd": {"imm": 97},
+
+    "pta": {"imp": 101},
+    "ptb": {"imp": 102},
+    "ptc": {"imp": 103},
+    "ptd": {"imp": 104},
+
+    "end": {"imp": 105},
+
+    
+    "create_folder":    {"imp": 106},
+    "create_file":      {"imp": 107},
+    "delete_folder":    {"imp": 108},
+    "delete_file":      {"imp": 109},
+    "move_item":        {"imp": 110},
+
+    "read_file":        {"imp": 111},
+    "store_file":       {"imp": 112},
+    "file_exists":      {"imp": 113},
+    "folder_exists":    {"imp": 114},
+
+    "get_working_dir":  {"imp": 115},
+    "get_parent":       {"imp": 116},
+    "list_children":    {"imp": 117},
+    "get_filename":     {"imp": 118},
+    "clear_stdout":     {"imp": 119},
+
+    "bne":              {"imm": 120},
+    
+    "change_dir":       {"imp": 121},
+    
+    "change_mode":      {"imp": 122}
+}
+
+
+if len(sys.argv) == 1:
+    print("sc: error: no input files")
+    exit()
+
+input_file = ""
+output_file = ""
+
+verbose = False
+
+i = 1
+while i < len(sys.argv):
+    if sys.argv[i][0] == '-':
+        match sys.argv[i][1]:
+            case 'o':
+                if len(sys.argv[i]) > 2:
+                    output_file = sys.argv[i][2:]
+                else:
+                    i += 1
+                    output_file = sys.argv[i]
+                if not os.path.isdir(os.path.dirname(output_file)):
+                    print(f"sc: {os.path.dirname(output_file)}: Does not exist")
+                    exit()
+            case 'v':
+                verbose = True
+    else:
+        if len(input_file) == 0:
+            input_file = sys.argv[i]
+        else:
+            print("sc: error: only 1 input file allowed.")
+            exit()
+    i += 1
+
+if len(input_file) == 0:
+    print("sc: error: no input files")
+    exit()
+
+if len(output_file) == 0:
+    output_file = os.path.splitext(input_file)[0]
+
+
+if os.path.isfile(input_file):
+    with open(input_file) as file:
+        data = file.read()
+else:
+    print(f"sc: error: invalid input file '{input_file}'")
+    exit()
+
+
+def append_token(current: str, is_arg: bool, line_number: int):
+    if len(current) == 0:
+        return False
+    token = False
+
+    if not is_arg:
+        if current[-1] == ":":
+            token = (current[:-1], TokenTypes.ADDRESS, line_number)
+            address_names.append(current[:-1])
+        else:
+            token = (current, TokenTypes.OPCODE, line_number)
+    else:
+        if current in ['a', 'b', 'c', 'd']:
+            token = (current, TokenTypes.REG_INDEX, line_number)
+        else:
+            token = (current, TokenTypes.IMMEDIATE, line_number)
+    tokens.append(token)
+    return token
+
+
+tokens = []
+address_names = []
+lines = data.splitlines()
+for l, line in enumerate(lines):
+    is_arg = False
+    in_quotes = False
+    current = ""
+    
+    i = 0
+    while i < len(line):
+        if in_quotes:
+            if line[i] == '"':
+                in_quotes = False
+                append_token(current, is_arg, l)
+            else:
+                if line[i] == "\\":
+                    if line[i+1] == "n":
+                        current += "�"
+                        i += 2
+                        continue
+                current += line[i]
+            i += 1
+            continue
+
+        if line[i] == ';':
+            i = len(line)
+
+        elif line[i] == ' ':
+            token = append_token(current, is_arg, l+1)
+            if token:
+                current = ""
+                if token[1] == TokenTypes.OPCODE:
+                    is_arg = True
+        
+        elif line[i] == '"':
+            in_quotes = True
+
+        else:
+            if line[i] == "\\":
+                if line[i+1] == "n":
+                    current += "�"
+                    i += 2
+                    continue
+            current += line[i]
+        
+        i += 1
+    append_token(current, is_arg, l+1)
+
+    if in_quotes:
+        print(f"{l+1}: Unexpected quote")
+
+
+success = True
+bytecode = "@*--spryte-strby"
+addresses = {}
+address_refs: list[list] = []
+
+
+i = 0
+while i < len(tokens):
+    match tokens[i][1]:
+        case TokenTypes.OPCODE:
+            if not tokens[i][0] in opcodes.keys():
+                print(f"{tokens[i][2]}: invalid opcode: {tokens[i][0]}")
+                success = False
+                i += 1
+                continue
+            addressings: dict = opcodes[tokens[i][0]]
+            
+            if i+1 == len(tokens):
+                if not "imp" in addressings.keys():
+                    print(f"{tokens[i][2]}: opcode {tokens[i][0]} does not have implied addressing.")
+                    i += 1
+                    continue
+                
+                if verbose:
+                    print(f"{tokens[i][2]}: adding {addressings["imp"]:02x}")
+                bytecode += f"{addressings["imp"]:02x}"
+                break
+
+            match tokens[i+1][1]:
+                case TokenTypes.OPCODE | TokenTypes.ADDRESS:
+                    if not "imp" in addressings.keys():
+                        print(f"{tokens[i][2]}: opcode {tokens[i][0]} does not have implied addressing.")
+                        i += 1
+                        continue
+
+                    if verbose:
+                        print(f"{tokens[i][2]}: adding {addressings["imp"]:02x}")
+                    bytecode += f"{addressings["imp"]:02x}"
+                
+                case TokenTypes.REG_INDEX:
+                    if not tokens[i+1][0] in addressings.keys():
+                        print(f"{tokens[i][2]}: opcode {tokens[i][0]} does not have {tokens[i+1][0]} registry addressing.")
+                        i += 1
+                        continue
+                    
+                    if verbose:
+                        print(f"{tokens[i][2]}: adding {addressings[tokens[i+1][0]]:02x}")
+                    bytecode += f"{addressings[tokens[i+1][0]]:02x}"
+            
+                case TokenTypes.IMMEDIATE:
+                    if not "imm" in addressings.keys():
+                        print(f"{tokens[i][2]}: opcode {tokens[i][0]} does not have immediate addressing.")
+                        i += 1
+                        continue
+
+                    if verbose:
+                        print(f"{tokens[i][2]}: adding {addressings["imm"]:02x}")
+                    bytecode += f"{addressings["imm"]:02x}"
+
+                    if tokens[i+1][0][0] == '"' and tokens[i+1][0][-1] == '"':
+                        if verbose:
+                            print(f"{tokens[i][2]}: adding {str(tokens[i+1][0][1:-1])}")
+                        bytecode += str(tokens[i+1][0][1:-1])
+                    else:
+                        if tokens[i+1][0] in address_names:
+                            address_refs.append([len(bytecode), tokens[i+1][0], -1])
+                        else:
+                            if verbose:
+                                print(f"{tokens[i][2]}: adding {str(tokens[i+1][0])}")
+                            bytecode += str(tokens[i+1][0])
+
+                    if verbose:
+                        print(f"{tokens[i][2]}: adding ;")
+                    bytecode += ';'
+        
+        case TokenTypes.ADDRESS:
+            addresses[tokens[i][0]] = len(bytecode)
+    
+    i += 1
+
+
+i = 0
+while i < len(address_refs):
+    ref = address_refs[i]
+    addr = addresses[ref[1]]
+    addr_str = str(addr)
+    addr_len = len(addr_str)
+
+    address_refs[i][2] = addr
+
+    bytecode = bytecode[:ref[0]] + addr_str + bytecode[ref[0]:]
+
+    if i < len(address_refs):
+        address_refs = [[x[0] + addr_len, x[1], x[2]] if x[0] > ref[0] else x for x in address_refs]
+    
+    for address in addresses.items():
+        if address[1] > ref[0]:
+            addresses[address[0]] = address[1] + addr_len
+    i += 1
+
+
+for _ in range(2):
+    i = 0
+    while i < len(address_refs):
+        ref = address_refs[i]
+        addr = addresses[ref[1]]
+        addr_str = str(addr)
+        addr_len = len(addr_str)
+
+        og_addr = ref[2]
+        og_addr_str = str(og_addr)
+        og_addr_len = len(og_addr_str)
+
+        address_refs[i][2] = addr
+
+        if addr != og_addr:
+            bytecode = bytecode[:ref[0]] + addr_str + bytecode[ref[0] + og_addr_len:]
+
+            if addr_len != og_addr_len:
+                if i < len(address_refs):
+                    address_refs = [[x[0] + addr_len - og_addr_len, x[1], x[2]] if x[0] > ref[0] else x for x in address_refs]
+                
+                for address in addresses.items():
+                    if address[1] > ref[0]:
+                        addresses[address[0]] = address[1] + addr_len - og_addr_len
+        
+        address_refs[i][2] = addr
+        i += 1
+
+
+with open(output_file, "w") as file:
+    file.write(bytecode)
