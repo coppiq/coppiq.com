@@ -1,0 +1,1100 @@
+<!doctype html>
+
+<html>
+<head>
+<style>
+body {
+    color: white;
+    background-color: black;
+}
+
+code {
+    display: block;
+    white-space: pre-wrap;
+}
+</style>
+</head>
+<body>
+<code>from enum import Enum
+from math import ceil
+import sys
+import os
+import textwrap
+import copy
+from prettytable import PrettyTable
+
+def eprint(*args, **kwargs) -> void:
+    print(*args, file=sys.stderr, **kwargs)
+
+PAGE_SIZE: int = 64
+
+MAGIC_NUMBER: str = "@*--spryte-"
+
+ALLOWED_LABEL_CHARS: str = "_"
+CONTAINERS: str = "{}[]()"
+DIRECTIVE_START: str = "."
+SPACE: str = " "
+NEWLINE: str = "␤"
+ESCAPE: str = "␛"
+NULL: str = "␀"
+BELL: str = "␇"
+STRING_MARKER: str = "Ⓢ"
+
+SEGMENT_MAP: dict(str, int) = {
+    "text":     0,
+    "data":     1,
+    "rodata":   2
+}
+
+REGISTER_MAP: dict(str, int) = {
+    "r0": 0,
+    "r1": 1,
+    "r2": 2,
+    "r3": 3,
+    "r4": 4,
+    "r5": 5,
+    "r6": 6,
+    "r7": 7,
+    "r8": 8,
+    "r9": 9,
+    "r10": 10, "ra": 10,
+    "r11": 11, "rb": 11,
+    "r12": 12, "rc": 12, "fp": 12,
+    "r13": 13, "rd": 13, "sp": 13,
+    "r14": 14, "re": 14, "lr": 14,
+    "r15": 15, "rf": 15, "pc": 15 
+}
+
+class Conditional(Enum):
+    LESS    = 0
+    LESS_EQ = 1
+    EQUAL   = 2
+    GREATER = 3
+    GT_EQ   = 4
+    NOT_EQ  = 5
+    UNCOND  = 6
+
+CONDITIONAL_MAP: dict(str, str) = {
+    "lt": Conditional.LESS,
+    "le": Conditional.LESS_EQ,
+    "eq": Conditional.EQUAL,
+    "gt": Conditional.GREATER,
+    "ge": Conditional.GT_EQ,
+    "ne": Conditional.NOT_EQ
+}
+
+class IdxMode(Enum):
+    IMM =   0
+    REG =   1
+    ABS =   2
+    ABSRO = 3
+    RI =    4
+    RIRO =  5
+
+
+class Opcode:
+    def __init__(self, char: str, addr_modes: tuple(IdxMode), has_conditional=False,
+                has_target_reg=True, has_return=False, has_second_reg=False):
+        self.char = char
+        self.addr_modes = addr_modes
+        self.has_conditional = has_conditional
+        self.has_target_reg = has_target_reg
+        self.has_return = has_return
+        self.has_second_register = has_second_reg
+    
+    def has_idx_mode(self, mode: IdxMode) -> bool:
+        return (mode in self.addr_modes)
+
+
+OPCODE_MAP: dict(str, Opcode) = {
+    "mov":  Opcode("!", (IdxMode.IMM, IdxMode.REG)),
+    "ldr":  Opcode("\"", (IdxMode.ABS, IdxMode.ABSRO, IdxMode.RI, IdxMode.RIRO)),
+    "str":  Opcode("#", (IdxMode.ABS, IdxMode.ABSRO, IdxMode.RI, IdxMode.RIRO)),
+    "swap": Opcode("$", (IdxMode.REG)),
+    "b": Opcode("%0", (IdxMode.IMM,),
+                has_conditional=True, has_target_reg=False),
+    "bs": Opcode("%1", (IdxMode.IMM,),
+                has_conditional=True, has_target_reg=False),
+    "br": Opcode("%2", (),
+                has_conditional=True, has_target_reg=False),
+    "bl": Opcode("&", (IdxMode.IMM,),
+                has_conditional=True, has_target_reg=False),
+    "svc": Opcode("'", (), has_target_reg=False),
+
+    "cmp": Opcode("(", (IdxMode.REG, IdxMode.IMM)),
+    "add": Opcode(")", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "sub": Opcode("*", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "mul": Opcode("+", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "div": Opcode(",", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "pow": Opcode("-", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "root": Opcode(".", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "log": Opcode("/", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "mod": Opcode("0", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    
+    "flr": Opcode("1", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "rnd": Opcode("2", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "cei": Opcode("3", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "sqrt": Opcode("4", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "sqr": Opcode("5", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "sin": Opcode("6", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "cos": Opcode("7", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "tan": Opcode("8", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    
+    "join": Opcode("9", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "ltr": Opcode(":", (IdxMode.REG, IdxMode.IMM), has_return=True),
+    "subs": Opcode(";", (IdxMode.REG, IdxMode.IMM), has_return=True, has_second_reg=True),
+
+    "len": Opcode("<", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "upp": Opcode("=", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+    "low": Opcode(">", (IdxMode.REG, IdxMode.IMM), has_return=True, has_target_reg=False),
+
+    "push": Opcode("?", (IdxMode.REG, IdxMode.IMM), has_return=False, has_target_reg=False),
+    "pop": Opcode("@", (), has_return=True, has_target_reg=False)
+}
+
+
+PSEUDO_OPCODES: list(str) = [
+    "adr"
+]
+
+
+class TokenType(Enum):
+    OPCODE =    0
+    REGISTER =  1
+    VALUE =     2
+    LABEL =     3
+    LABEL_DEF = 4
+    COMMA =     5
+    CONTAINER = 6
+    MACRO =     7
+    DIRECTIVE = 8
+    IMMEDIATE = 9
+    ESCAPE =    10
+    ADD =       11
+    NEWLINE =   12
+    PSEUDO_OP = 13
+    ANON_LBL =  14
+    INVALID =   15
+
+class Token:
+    def __init__(self, type: TokenType, value: str, x: int, y: int, source_file : str = ""):
+        self.type = type
+        self.value = value
+        self.x = x
+        self.y = y
+        self.source_file = source_file
+    
+    def set_type(self, type: TokenType) -> Token:
+        self.type = type
+        return self
+
+    def __str__(self):
+        return f"{self.y + 1}:{self.x + 1}".ljust(7) + f"| {self.type.name}".ljust(11) + f" | '{self.value}'"
+    
+    def __repr__(self):
+        return '\n    ' + self.__str__()
+    
+    def copy(self):
+        return copy.copy(self)
+
+
+file_name: str = ""
+error_count: int = 0
+
+macros: dict(str, list(Token)) = {}
+
+
+def visible_code(data: list(str), x: int, y: int, source_file: str, range: int = 2) -> void:
+    if (len(source_file) > 0 and source_file[0] != '\0'):
+        with open(source_file) as file:
+            data = file.read().splitlines()
+    
+    pad: int = len(str(y + 1 + range)) + 1
+    y_iter: int = y
+    y_iter -= range
+    if (y_iter < 0): y_iter = 0
+    while (y_iter < len(data) and y_iter < y + 1):
+        eprint(str(y_iter + 1).ljust(pad) + "| " + data[y_iter])
+        y_iter += 1
+    eprint("".ljust(pad) + "| " + "".ljust(x) + "\x1b[1;32m^\x1b[22;39m")
+    while (y_iter < len(data) and y_iter < y + range + 1):
+        eprint(str(y_iter + 1).ljust(pad) + "| " + data[y_iter])
+        y_iter += 1
+
+def visible_note(message: str, data: list(str), x: int, y: int, source_file: str, range: int = 2) -> void:
+    eprint(f"\x1b[1m{source_file}:\x1b[35m{y + 1}\x1b[39m:\x1b[35m{x + 1}\x1b[39m:\x1b[30m note: \x1b[39m{message}\x1b[22m")
+    visible_code(data, x, y, source_file, range)
+
+def visible_warning(message: str, data: list(str), x: int, y: int, source_file: str, range: int = 2) -> void:
+    eprint(f"\x1b[1m{source_file}:\x1b[35m{y + 1}\x1b[39m:\x1b[35m{x + 1}\x1b[39m:\x1b[35m warning: \x1b[39m{message}\x1b[22m")
+    visible_code(data, x, y, source_file, range)
+
+def visible_error(message: str, data: list(str), x: int, y: int, source_file: str, range: int = 2) -> void:
+    global error_count
+    error_count += 1
+
+    eprint(f"\x1b[1m{source_file}:\x1b[35m{y + 1}\x1b[39m:\x1b[35m{x + 1}\x1b[39m:\x1b[31m error: \x1b[39m{message}\x1b[22m")
+    visible_code(data, x, y, source_file, range)
+
+
+def escape_char(char: str) -> str:
+    replacements: dict(str, str) = {
+        "n": NEWLINE,
+        "e": ESCAPE,
+        "0": NULL,
+        "b": BELL,
+        "\\": "\\",
+        "\"": "\"",
+        "'": "'"
+    }
+    
+    if (char in replacements):
+        return replacements[char]
+    return ""
+
+def read_word(data: list(str), macros: dict(str, list(Token)), source_file: str, x: int, y: int) -> tuple(int, Token):
+    class Mode(Enum):
+        NAME =  0
+        COMM =  1
+        CONT =  2
+        DIR =   3
+        STR =   4
+        IMM =   5
+        NUM =   6
+        SEMI =  7
+        ESC =   8
+        ADD =   9
+        LDEF =  10
+        INV =   11
+    
+    def get_mode(char: str) -> Mode:
+        if (char.isnumeric() or char == "-"):
+            return Mode.NUM
+        if (char.isalpha() or char in ALLOWED_LABEL_CHARS):
+            return Mode.NAME
+        if (char == ","):
+            return Mode.COMM
+        if (char in CONTAINERS):
+            return Mode.CONT
+        if (char == DIRECTIVE_START):
+            return Mode.DIR
+        if (char in "\"'"):
+            return Mode.STR
+        if (char == "#"):
+            return Mode.IMM
+        if (char == ";"):
+            return Mode.SEMI
+        if (char == "\\"):
+            return Mode.ESC
+        if (char == "+"):
+            return Mode.ADD
+        if (char == ":"):
+            return Mode.LDEF
+        return Mode.INV
+    
+    word: str = ""
+    line_length: int = len(data[y])
+
+    while (x < line_length and data[y][x] == SPACE):
+        x += 1
+    
+    if (x == line_length):
+        return (-1, Token(TokenType.INVALID, word, x, y))
+
+
+    first_x: int = x
+    first_char: str = data[y][x]
+    mode: Mode = get_mode(first_char)
+
+    return_token: Token = Token(TokenType.INVALID, first_char, first_x, y, source_file)
+
+    x += 1
+    match (mode):
+        case Mode.COMM:
+            return (x, return_token.set_type(TokenType.COMMA))
+        case Mode.CONT:
+            return (x, return_token.set_type(TokenType.CONTAINER))
+        case Mode.INV:
+            visible_error(f"invalid character: '{first_char.replace("\n", "\\n")}'", data, first_x, y, source_file)
+            return (x, return_token)
+        case Mode.IMM:
+            return (x, return_token.set_type(TokenType.IMMEDIATE))
+        case Mode.ESC:
+            return (x, return_token.set_type(TokenType.ESCAPE))
+        case Mode.ADD:
+            return (x, return_token.set_type(TokenType.ADD))
+        case Mode.LDEF:
+            if (x < line_length and data[y][x] in "+-"):
+                return_token.value = data[y][x]
+                x += 1
+                return (x, return_token.set_type(TokenType.ANON_LBL))
+            else:
+                return_token.value = ""
+                return (x, return_token.set_type(TokenType.LABEL_DEF))
+        case Mode.SEMI:
+            return (-1, return_token)
+        case Mode.NAME | Mode.NUM:
+            word += first_char
+
+    if (mode == Mode.STR):
+        while (x < line_length and (char := data[y][x]) != first_char):
+            if (char == "\\"):
+                if (x == line_length - 1):
+                    visible_error(f"missing terminating '\"' character", data, first_x, y, source_file)
+                    return (x, Token(TokenType.INVALID, word, first_x, y)) # string not closed with backslash at end
+                x += 1
+                word += escape_char(data[y][x])
+            else:
+                word += char
+            x += 1
+        if (x == line_length):
+            visible_error(f"missing terminating '\"' character", data, first_x, y, source_file)
+            return (-1, Token(TokenType.INVALID, word, x, y))
+        x += 1
+
+        return_token.value = word
+        return (x, return_token.set_type(TokenType.VALUE))
+    elif (mode == Mode.NUM):
+        while (x < line_length and get_mode(char := data[y][x]) in (Mode.NUM, Mode.DIR)):
+            word += char
+            x += 1
+        return_token.value = word
+        try:
+            float(word)
+            return (x, return_token.set_type(TokenType.VALUE))
+        except ValueError:
+            return (x, return_token)
+
+    while (x < line_length and get_mode(char := data[y][x]) in (Mode.NAME, Mode.NUM)):
+        word += char
+        x += 1
+
+    return_token.value = word
+    
+    if (mode == Mode.DIR):
+        if (len(word) == 0):
+            return (x, return_token)
+        
+        return (x, return_token.set_type(TokenType.DIRECTIVE))
+
+    if (x < line_length and data[y][x] == ":"):
+        x += 1
+        return (x, return_token.set_type(TokenType.LABEL_DEF))
+
+    if (word in REGISTER_MAP):
+        return (x, return_token.set_type(TokenType.REGISTER))
+
+    if (word in OPCODE_MAP):
+        return (x, return_token.set_type(TokenType.OPCODE))
+    
+    if (word in PSEUDO_OPCODES):
+        return (x, return_token.set_type(TokenType.PSEUDO_OP))
+
+    if (word in macros.keys()):
+        return (x, return_token.set_type(TokenType.MACRO))
+    
+    if (len(word) > 2 and (subword := word[:-2]) in OPCODE_MAP):
+        return (x, return_token.set_type(TokenType.OPCODE))
+
+    return (x, return_token.set_type(TokenType.LABEL))
+
+
+def get_full_path(path: str):
+    if (os.path.isfile(path)):
+        return path
+    
+    paths = os.environ.get("SC_LIB_PATH")
+    if (not paths is None):
+        paths = paths.split(":")
+    else:
+        return ""
+
+    for p in paths:
+        if (os.path.isfile(p + "/" + path)):
+            return p + "/" + path
+    return ""
+
+
+def tokenise(data: list(str), file_name: str, tokens: list = [], macros: dict = {}, source_file: str = "") -> list:
+    global error_count
+
+    in_define: bool = False
+    define_single_line: bool = False
+    define_token: Token
+    define_name: str = ""
+    define_tokens: list(Token) = []
+
+    y: int = 0
+    while (y < len(data)):
+        x: int = 0
+        while (x < len(data[y])):
+            x, token = read_word(data, macros, source_file, x, y)
+            if (x == -1):
+                break
+
+            if (token.type == TokenType.MACRO):
+                if (in_define):
+                    if (len(macros[token.value]) > 0 and macros[token.value][0].type == TokenType.VALUE):
+                        if (len(define_tokens) > 0 and define_tokens[-1].type == TokenType.VALUE):
+                            define_tokens[-1].value += macros[token.value][0].value
+                            define_tokens += macros[token.value][1:]
+                            continue
+                    define_tokens += macros[token.value]
+                else:
+                    if (len(macros[token.value]) > 0 and macros[token.value][0].type == TokenType.VALUE):
+                        if (len(tokens) > 0 and tokens[-1].type == TokenType.VALUE):
+                            tokens[-1].value += macros[token.value][0].value
+                            tokens += macros[token.value][1:]
+                            continue
+                    tokens += macros[token.value].copy()
+                continue
+            
+            if (token.type == TokenType.VALUE):
+                if (in_define):
+                    if (len(define_tokens) > 0 and define_tokens[-1] == TokenType.VALUE):
+                        define_tokens[-1] = define_tokens[-1].copy()
+                        define_tokens[-1].value += token.value
+                        continue
+                else:
+                    if (len(tokens) > 0 and tokens[-1].type == TokenType.VALUE):
+                        tokens[-1] = tokens[-1].copy()
+                        tokens[-1].value += token.value
+                        continue
+            
+            if (token.type == TokenType.LABEL_DEF):
+                if (in_define):
+                    visible_error("cannot define label inside macro", data, token.x, token.y, token.source_file)
+                    break
+
+                tokens.append(token)
+                continue
+
+            if (token.type == TokenType.DIRECTIVE):
+                match (token.value):
+                    case "deflines"|"define":
+                        if (in_define):
+                            visible_error("cannot define macro inside of definition", data, token.x, token.y, token.source_file)
+                            break
+                        define_token = token
+                        define_single_line = (token.value == "define")
+                        in_define = True
+                        
+                        x, token = read_word(data, macros, source_file, x, y)
+                        if (x > len(data[y]) or x == -1):
+                            visible_error("undefined macro", data, len(data[y]), y)
+                            break
+                        if (token.type != TokenType.LABEL):
+                            visible_error("invalid macro definition", data, token.x, token.y, token.source_file)
+                            x = -1
+                            break
+                        define_name = token.value
+                        continue
+                    
+                    case "enddef":
+                        if (not in_define):
+                            visible_error("no define to close", data, token.x, token.y, token.source_file)
+                            break
+
+                        macros[define_name] = define_tokens.copy()
+                        define_tokens.clear()
+                        
+                        in_define = False
+                        break
+
+                    case "include":
+                        x, path_token = read_word(data, macros, source_file, x, y)
+                        if (path_token.type != TokenType.VALUE):
+                            visible_error("expected string path", data, path_token.x, path_token.y, path_token.source_file)
+                            break
+                        full_path = get_full_path(path_token.value)
+                        if (full_path != ""):
+                            with open(full_path) as file:
+                                tokenise(file.read().splitlines(), file_name = full_path.split("/")[-1],
+                                                tokens=tokens, macros=macros, source_file=full_path)
+                        else:
+                            visible_error("file doesn't exist", data, token.x, token.y, token.source_file)
+                        break
+                            
+            if (in_define):
+                define_tokens.append(token)
+            else:
+                tokens.append(token)
+
+        if (in_define):
+            if (len(define_tokens) > 0):
+                if (define_tokens[-1].type == TokenType.ESCAPE):
+                    define_tokens.pop()
+                else:
+                    if (define_tokens[-1].type != TokenType.NEWLINE):
+                        define_tokens.append(Token(TokenType.NEWLINE, "", len(data[y]), y))
+            
+            if (define_single_line):
+                define_tokens = define_tokens[:-1]
+                macros[define_name] = define_tokens.copy()
+                define_tokens.clear()
+                in_define = False
+        else:
+            if (len(tokens) > 0):
+                if (tokens[-1].type == TokenType.ESCAPE):
+                    tokens.pop()
+                else:
+                    if (tokens[-1].type != TokenType.NEWLINE):
+                        tokens.append(Token(TokenType.NEWLINE, "", len(data[y]), y))
+        
+        y += 1
+    
+    if (in_define):
+        visible_error("deflines not closed", data, define_token.x, define_token.y, define_token.source_file)
+
+    return tokens
+
+
+def main() -> void:
+    global error_count
+
+    if len(sys.argv) == 1:
+        print("sc: error: no input files")
+        exit()
+
+    
+    version_name: str = "bluby"
+    version_number: str = "0"
+    version_number_readable: str = "1.0.0"
+    entry_label: str = "_start"
+
+    data: list(str) = []
+    input_file: str = ""
+    output_file: str = ""
+    
+    print_output: bool = False
+    verbose: bool = False
+
+    i = 1
+    while (i < len(sys.argv)):
+        if (sys.argv[i][0] == '-'):
+            if (len(sys.argv[i]) == 2):
+                opt = sys.argv[i][1:]
+                match (opt):
+                    case 'o'|'out'|'output':
+                        print_output = False
+
+                        if (i + 1 == len(sys.argv)):
+                            eprint(f"sc: expected output file after '-{opt}'")
+                            exit()
+                        
+                        i += 1
+                        output_file = sys.argv[i]
+                        
+                        output_dir: str = os.path.dirname(output_file)
+                        if len(output_dir) > 0 and not os.path.isdir(output_dir):
+                            eprint(f"sc: {os.path.dirname(output_file)}: does not exist")
+                            exit()
+                    case 'p'|'print':
+                        print_output = True
+                        output_file = ""
+                    case 'v'|'verbose':
+                        verbose = True
+                    case _:
+                        eprint(f"sc: unknown option '{opt}'")
+        else:
+            if len(input_file) == 0:
+                input_file = sys.argv[i]
+            else:
+                print("sc: error: only 1 input file allowed.")
+                exit()
+        i += 1
+
+    if len(input_file) == 0:
+        print("sc: error: no input files")
+        exit()
+
+    if not print_output and len(output_file) == 0:
+        output_file = os.path.splitext(input_file)[0] + '.out'
+
+    if os.path.isfile(input_file):
+        with open(input_file) as file:
+            data = file.read().splitlines()
+    else:
+        print(f"sc: error: invalid input file '{input_file}'")
+        exit()
+    
+    file_name = '\0' + input_file.split("/")[-1]
+
+    macros: dict(str, list(Token)) = {}
+
+    tokens = tokenise(data, file_name, macros=macros, source_file=file_name)
+
+    bytecode: list(str) = []
+
+    labels: list(tuple(int, int, str)) = []
+    label_defines: dict(str, tuple(int, int)) = {}
+
+    segment_tokens: dict(int, int) = {}
+    segment_indices: dict(int, int) = {}
+    
+    segment_offset: int = 0
+
+    last_anon_label_def: int = -1
+    forward_anon_labels: list(tuple(int, int, int)) = []
+
+    i: int = 0
+    while (i < len(tokens)):
+        token = tokens[i]
+
+        if (token.type == TokenType.LABEL_DEF):
+            if (len(token.value) == 0):
+                last_anon_label_def = len(bytecode) + segment_offset
+
+                for label_i in forward_anon_labels:
+                    bytecode[label_i[0]] = str(last_anon_label_def - label_i[1]) + STRING_MARKER
+                forward_anon_labels.clear()
+                i += 1
+                token = tokens[i]
+                if (token.type == TokenType.NEWLINE):
+                    i += 1
+                    continue
+
+            if (token.value in label_defines):
+                visible_error(f"label '{token.value}' already defined", data, token.x, token.y, token.source_file)
+                first_token: Token = tokens[label_defines[token.value][1]]
+                visible_note("here", data, first_token.x, first_token.y)
+                while (tokens[i].type != TokenType.NEWLINE):
+                    i += 1
+                i += 1
+                continue
+            label_defines[token.value] = (len(bytecode) + segment_offset, i)
+            i += 1
+            token = tokens[i]
+            if (token.type == TokenType.NEWLINE):
+                i += 1
+                continue
+
+        for _ in range(1): # I REALLY want to use 'break'. I'm sorry. Wait, no, I'm not sorry actually.
+            match (token.type):
+                case TokenType.PSEUDO_OP:
+                    match token.value:
+                        case "adr":
+                            instruction = OPCODE_MAP["add"].char + str(IdxMode.IMM.value)
+
+                            i += 1
+                            token = tokens[i]
+                            if (token.type != TokenType.REGISTER):
+                                visible_error(f"expected register", data, token.x, token.y, token.source_file)
+                                break
+                            instruction += f"{REGISTER_MAP[token.value]:x}"
+                            instruction += f"{REGISTER_MAP["pc"]:x}"
+
+                            i += 1
+                            token = tokens[i]
+                            if (token.type != TokenType.COMMA):
+                                visible_error(f"expected ','", data, token.x, token.y, token.source_file)
+                                break
+                            i += 1
+                            token = tokens[i]
+                            if (token.type == TokenType.IMMEDIATE):
+                                i += 1
+                                token = tokens[i]
+                            
+                            bytecode.append(instruction)
+                            
+                            if (token.type != TokenType.LABEL):
+                                visible_error(f"expected label", data, token.x, token.y, token.source_file)
+                                break
+
+                            bytecode.append(str(-(len(bytecode) - 1 + segment_offset)) + STRING_MARKER)
+                            labels.append((len(bytecode) - 1, i, token.value))
+                            
+                            
+                            # subtract instruction position relative to the start of the segment
+                            # and mark the label to be added later
+
+
+                case TokenType.OPCODE:
+                    conditional: str = ""
+                    opcode: Opcode
+
+                    if (len(token.value) > 2 and (cond := token.value[-2:])):
+                        if (cond in CONDITIONAL_MAP):
+                            conditional = str(CONDITIONAL_MAP[cond].value)
+                            opcode = OPCODE_MAP[token.value[:-2]]
+
+                            if (not opcode.has_conditional):
+                                visible_error(f"opcode does not have conditionals", data, token.x, token.y, token.source_file)
+                                break
+                        else:
+                            opcode = OPCODE_MAP[token.value]
+                    else:
+                        opcode = OPCODE_MAP[token.value]
+                    
+                    if (opcode.has_conditional and conditional == ""):
+                        conditional = str(Conditional.UNCOND.value)
+                    
+                    opcode_sym: str = opcode.char
+                    arguments: str = ""
+                    arg_count: int = int(opcode.has_return) + int(opcode.has_target_reg) + int(opcode.has_second_register)
+                    previous_err_c: int = error_count
+
+                    for arg in range(arg_count):
+                        i += 1
+                        token = tokens[i]
+                        if (not token.type == TokenType.REGISTER):
+                            visible_error(f"expected register", data, token.x, token.y, token.source_file)
+                            break
+                        else:
+                            arguments += f"{REGISTER_MAP[token.value]:x}"
+                            if (arg == arg_count - 1 and len(opcode.addr_modes) == 0):
+                                continue
+                            else:
+                                i += 1
+                                token = tokens[i]
+                                if (tokens[i].type != TokenType.COMMA):
+                                    visible_error("expected ','", data, token.x, token.y, token.source_file)
+                                    break
+                    
+                    # This is horrible, but I don't care. I'm evil.
+                    if (error_count > previous_err_c):
+                        break
+                    
+                    i += 1
+                    token = tokens[i]
+
+                    args_end: int = i
+
+                    is_immediate: bool = True
+                    value: str = None
+                    label: str = None
+                    register_1: str = None
+                    register_2: str = None
+
+                    while (tokens[args_end].type != TokenType.NEWLINE):
+                        args_end += 1
+                    if (args_end > i):
+                        if (len(opcode.addr_modes) == 0):
+                            visible_error("instruction does not take any arguments", data, token.x, token.y, token.source_file)
+                            break
+                        args_end -= 1
+                    else:
+                        if (len(opcode.addr_modes) == 0):
+                            bytecode.append(opcode_sym + conditional + arguments)
+                            break
+                    
+                    if (token.type == TokenType.CONTAINER):
+                        if (token.value != '['):
+                            visible_error("invalid expression", data, token.x, token.y, token.source_file)
+                            break
+                        is_immediate = False
+                        i += 1
+                        token = tokens[i]
+                    
+                    if (is_immediate):
+                        if (token.type == TokenType.IMMEDIATE):
+                            i += 1
+                            token = tokens[i]
+                            if (not token.type in (TokenType.VALUE, TokenType.LABEL)):
+                                visible_error("expected immediate value", data, token.x, token.y, token.source_file)
+                                break
+
+                        match (token.type):
+                            case TokenType.REGISTER:
+                                register_1 = token.value
+                                arguments += f"{REGISTER_MAP[token.value]:x}"
+                            case TokenType.VALUE:
+                                value = token.value
+                            case TokenType.LABEL:
+                                label = token.value
+                                value = str(-(len(bytecode) + segment_offset))
+                                labels.append((len(bytecode) + 1, i, label))
+                            case TokenType.ANON_LBL:
+                                if (token.value == "-"):
+                                    if (last_anon_label_def == -1):
+                                        visible_error(f"matching ':' definition not found", data, token.x, token.y, token.source_file)
+                                        break
+                                    value = str(last_anon_label_def - (len(bytecode) + segment_offset))
+                                else:
+                                    value = "+INVALID+"
+                                    forward_anon_labels.append((len(bytecode) + 1, len(bytecode) + segment_offset, i))
+                            case _:
+                                visible_error("expected register, value, or index", data, token.x, token.y, token.source_file)
+                                break
+                        i += 1
+                        token = tokens[i]
+                        if (token.type != TokenType.NEWLINE):
+                            visible_error("expected end of line", data, token.x, token.y, token.source_file)
+                            break
+                    else:
+                        previous_err_c: int = error_count
+                        closed: bool = False
+
+                        while (token.type != TokenType.NEWLINE):
+                            if (token.type == TokenType.IMMEDIATE):
+                                i += 1
+                                token = tokens[i]
+                                if (not token.type in (TokenType.VALUE, TokenType.LABEL)):
+                                    visible_error("expected immediate value", data, token.x, token.y, token.source_file)
+                                    break
+
+                            match (token.type):
+                                case TokenType.REGISTER:
+                                    if (not register_2 is None):
+                                        visible_error("cannot sum more than 2 registers", data, token.x, token.y, token.source_file)
+                                        break
+                                    
+                                    arguments += f"{REGISTER_MAP[token.value]:x}"
+
+                                    if (not register_1 is None):
+                                        register_2 = token.value
+                                    else:
+                                        register_1 = token.value
+                                case TokenType.LABEL:
+                                    if (not register_1 is None):
+                                        visible_error("cannot sum a relative label and a register", data, token.x, token.y, token.source_file)
+                                        break
+                                    
+                                    if (not label is None):
+                                        visible_error("cannot sum two labels", data, token.x, token.y, token.source_file)
+                                        break
+
+                                    register_1 = "pc"
+                                    arguments += f"{REGISTER_MAP[register_1]:x}"
+                                    label = token.value
+                                    value = str(-(len(bytecode) + segment_offset))
+                                    labels.append((len(bytecode) + 1, i, label))
+                                case TokenType.VALUE:
+                                    if (not value is None):
+                                        try:
+                                            value = str(int(value) + int(token.value))
+                                        except ValueError:
+                                            visible_error("index not integer", data, token.x, token.y, token.source_file)
+                                            break
+                                    else:
+                                        try:
+                                            value = str(int(token.value))
+                                        except ValueError:
+                                            visible_error("index not integer", data, token.x, token.y, token.source_file)
+                                            break
+                                case _:
+                                    visible_error("invalid expression", data, token.x, token.y, token.source_file)
+                                    break
+                            i += 1
+                            token = tokens[i]
+                            match (token.type):
+                                case TokenType.CONTAINER:
+                                    if (token.value != ']'):
+                                        visible_error("invalid expression", data, token.x, token.y, token.source_file)
+                                        break
+                                    if (tokens[i + 1].type != TokenType.NEWLINE):
+                                        visible_error("expected end of line", data, token.x, token.y, token.source_file)
+                                        break
+                                    closed = True
+                                case TokenType.ADD:
+                                    pass
+                                case _:
+                                    visible_error("invalid expression", data, token.x, token.y, token.source_file)
+                                    break
+                            
+                            i += 1
+                            token = tokens[i]
+                        
+                        # This is horrible, but I don't care. 
+                        # I look so good in chainmail that it's not renaissance fair.
+                        if (error_count > previous_err_c):
+                            break
+
+                        if (not closed):
+                            visible_error("expected ']'", data, token.x, token.y, token.source_file)
+                            break
+                    
+                    indexing_mode: IdxMode
+                    if (is_immediate):
+                        if (not register_1 is None):
+                            indexing_mode = IdxMode.REG
+                        else:
+                            indexing_mode = IdxMode.IMM
+                    else:
+                        if (not register_1 is None):
+                            if (not register_2 is None):
+                                if (not label is None or not value is None):
+                                    visible_error("cannot sum 2 registers and an absolute value", data, token.x, token.y, token.source_file)
+                                    break
+
+                                indexing_mode = IdxMode.RIRO
+                            else:
+                                if (not label is None or not value is None):
+                                    indexing_mode = IdxMode.ABSRO
+                                else:
+                                    indexing_mode = IdxMode.RI
+                        else:
+                            if (not label is None or not value is None):
+                                indexing_mode = IdxMode.ABS
+
+                    if (not opcode.has_idx_mode(indexing_mode)):
+                        visible_error(f"'{[key for key, val in OPCODE_MAP.items() if val == opcode][0]}' does not support {indexing_mode.name} indexing", data, token.x, token.y, token.source_file)
+                        break
+                    
+                    addr_mode_str = str(indexing_mode.value)
+                    if (len(opcode.addr_modes) == 1):
+                        addr_mode_str = ""
+
+                    bytecode.append(opcode_sym + conditional + addr_mode_str + arguments)
+
+                    if (not value is None or not label is None):
+                        bytecode.append(STRING_MARKER)
+                        if (not value is None):
+                            bytecode[-1] = value + STRING_MARKER
+
+
+                case TokenType.DIRECTIVE:
+                    if (token.value in SEGMENT_MAP):
+                        key = SEGMENT_MAP[token.value]
+                        if (len(bytecode) > 0 and len(segment_tokens) == 0):
+                            segment_tokens[SEGMENT_MAP["text"]] = 0
+                            segment_indices[SEGMENT_MAP["text"]] = 0
+                        
+                        if (len(bytecode) in segment_indices.values()):
+                            del segment_indices[list(segment_indices.keys())[list(segment_indices.values()).index(len(bytecode))]]
+
+                        if (key in segment_tokens):
+                            visible_error(f".{token.value} segment already defined", data, token.x, token.y, token.source_file)
+                            initial_token: Token = tokens[segment_tokens[key]]
+                            visible_note("here", data, initial_token.x, initial_token.y)
+                        else:
+                            segment_tokens[key] = i
+                            segment_indices[key] = len(bytecode)
+                            next_page_idx = ceil((len(bytecode) + segment_offset) / PAGE_SIZE) * PAGE_SIZE
+                            segment_offset += next_page_idx - len(bytecode) + segment_offset
+                        break
+
+                    match (token.value):
+                        case "segment"|"global":
+                            pass
+                        case "string":
+                            i += 1
+                            token = tokens[i]
+                            if (token.type != TokenType.VALUE):
+                                visible_error("expected string", data, token.x, token.y, token.source_file)
+                                break
+                            bytecode.append(STRING_MARKER + token.value + STRING_MARKER)
+                        case "chars":
+                            i += 1
+                            token = tokens[i]
+                            if (token.type != TokenType.VALUE):
+                                visible_error("expected value", data, token.x, token.y, token.source_file)
+                                break
+                            bytecode += [char for char in token.value]
+                        case "items":
+                            i += 1
+                            token = tokens[i]
+                            if (token.type != TokenType.VALUE):
+                                visible_error("expected integer", data, token.x, token.y, token.source_file)
+                                break
+                            try:
+                                bytecode += ["0" for _ in range(int(token.value))]
+                            
+                            except ValueError:
+                                visible_error("expected integer", data, token.x, token.y, token.source_file)
+                                break
+
+                        case _:
+                            visible_error(f"invalid directive '{token.value}'", data, token.x, token.y, token.source_file)
+                            break
+
+                case _:
+                    visible_error("expected expression", data, token.x, token.y, token.source_file)
+            
+        while (tokens[i].type != TokenType.NEWLINE):
+            i += 1
+        i += 1
+
+    if (len(bytecode) > 0 and len(segment_tokens) == 0):
+        segment_tokens[SEGMENT_MAP["text"]] = 0
+        segment_indices[SEGMENT_MAP["text"]] = 0
+
+    if (len(forward_anon_labels) > 0):
+        for label in forward_anon_labels:
+            visible_error(f"matching ':' definition not found", data, tokens[label[2]].x, tokens[label[2]].y, tokens[label[2]].source_file)
+
+    for label in labels:
+        if (not label[2] in label_defines):
+            visible_error(f"undefined label '{label[2]}'", data, tokens[label[1]].x, tokens[label[1]].y, tokens[label[1]].source_file)
+            continue
+        
+        offset_str: str = bytecode[label[0]][:-1]
+        offset: int = 0
+        if (len(offset_str) != 0):
+            offset = int(offset_str)
+        bytecode[label[0]] = str(label_defines[label[2]][0] + offset) + STRING_MARKER
+    
+    if (not entry_label in label_defines):
+        eprint(f"sc: error: entry point '{entry_label}' not found")
+        error_count += 1
+
+    if (verbose):
+        table = PrettyTable()
+        table.title = "tokens"
+        table.field_names = ["index", "source", "type", "value"]
+
+        for i, token in enumerate(tokens):
+            table.add_row([i, f"{token.x}:{token.y}", token.type.name, textwrap.fill(token.value, width=10)])
+        
+        print(table)
+        table.clear()
+        table.title = "bytecode"
+        table.field_names = ["index", "value"]
+
+        for i, inst in enumerate(bytecode):
+            table.add_row([i, textwrap.fill(inst, width=10)])
+        
+        print(table)
+        table.clear()
+        table.title = "labels"
+        table.field_names = ["name", "bytecode idx", "token idx"]
+
+        for label in labels:
+            table.add_row([label[2], label[0], label[1]])
+        
+        print(table)
+        table.clear()
+        table.title = "label defines"
+        table.field_names = ["name", "bytecode idx", "token idx"]
+
+        for key, value in label_defines.items():
+            table.add_row([key, value[0], value[1]])
+        
+        print(table)
+        table.clear()
+        table.title = "macros"
+        table.field_names = ["name", "value"]
+        table.align = "l"
+        
+        for key, value in macros.items():
+            table.add_row([key, value])
+        
+        print(table)
+
+    if (error_count > 0):
+        eprint(f"sc: failed with {error_count} error{"s" if error_count > 1 else ""}")
+        return
+
+    output_code = MAGIC_NUMBER + version_name + version_number \
+                + STRING_MARKER + version_number_readable + STRING_MARKER
+    
+    output_code += str(label_defines[entry_label][0]) + STRING_MARKER
+    
+    output_code += str(list(segment_indices.keys())[0]) + "=" + str(list(segment_indices.values())[0])
+    for key, value in list(segment_indices.items())[1:]:
+        output_code += ";" + str(key) + "=" + str(value)
+    output_code += STRING_MARKER
+
+    output_code += "".join(bytecode)
+
+    if (print_output or verbose):
+        print(output_code)
+    else:
+        with open(output_file, "w") as file:
+            file.write(output_code)
+    
+if __name__ == "__main__":
+    main()
+</code>
+</body>
+</html>
